@@ -3,9 +3,11 @@
 #include <iostream>
 #include <string.h>
 #include <vector>
-#include <gflags/gflags.h>
 
-DECLARE_bool(check);
+extern bool FLAGS_check;
+extern int FLAGS_runs;
+extern double Total_throughput;
+extern double Total_kernel_time;
 
 using namespace std;
 
@@ -98,19 +100,43 @@ bool wcc<vertex_t,index_t,value_t>::check()
 
 int main(int argc,char **argv)
 {
-	typedef unsigned int  vertex_t;
-    typedef unsigned int  index_t;
-	typedef unsigned int  value_t;
+    setvbuf(stdout, NULL, _IONBF, 0);
+#if defined(LARGESIZE)
+    typedef unsigned long int vertex_t;
+    typedef unsigned long int index_t;
+    typedef unsigned long int value_t;
+#elif defined(MIDIUMSIZE)
+    typedef unsigned int      vertex_t;
+    typedef unsigned long int index_t;
+    typedef unsigned int      value_t;
+#else
+    typedef unsigned int      vertex_t;
+    typedef unsigned int      index_t;
+    typedef unsigned int      value_t;
+#endif
 
+    printf("|=============================Execute===============================|\n");
     wcc<vertex_t,index_t,value_t> mywcc(argc,argv);
     mywcc.load_graph();
     double time1,time2;
+    int runs = FLAGS_runs > 0 ? FLAGS_runs : 1;
     time1 = wtime();
-	mywcc.run();
+    for(int i = 0; i < runs; i++) {
+        mywcc.run();
+    }
     time2 = wtime();
-    cout<<"wcc cost "<<time2 - time1<<" seconds "<<endl;
-    if(FLAGS_check && mywcc.check()){
-        cout<<"check passed!"<<endl;
+    double avg_t = (time2 - time1) / runs;
+    printf("|      Avgrage(%2d Rounds) WCC wall      : %.8f seconds        |\n", runs, avg_t);
+    printf("|      Avgrage(%2d Rounds) WCC kernel    : %.8f seconds        |\n", runs, Total_kernel_time/runs);
+    printf("|===================================================================|\n");
+    if(FLAGS_check){
+#ifdef SCAPH_KEEP_CSR_FOR_CHECK
+        if(mywcc.check()){
+            cout<<"check passed!"<<endl;
+        }
+#else
+        cout<<"--check requires building with -DSCAPH_KEEP_CSR_FOR_CHECK"<<endl;
+#endif
     }
     return 0;
 }

@@ -120,12 +120,12 @@ __global__ void  gpu_push_csr(value_t *value, bool *stat, vertex_t *page, vertex
         //process warp node
         unsigned int warp_id = threadIdx.x/WPSIZE;
         unsigned int lane_id = cub::LaneId();
-        while(__any(len >= WPSIZE))
+        while(__any_sync(0xffffffff, len >= WPSIZE))
         {
-           int mask = __ballot(len >= WPSIZE ? 1 : 0);
+           int mask = __ballot_sync(0xffffffff, len >= WPSIZE ? 1 : 0);
            int leader = __ffs(mask) - 1;
-           unsigned int tpos = cub::ShuffleIndex(pos, leader);
-           unsigned int tlen = cub::ShuffleIndex(len, leader);
+           unsigned int tpos = __shfl_sync(0xffffffff, pos, leader);
+           unsigned int tlen = __shfl_sync(0xffffffff, len, leader);
            if(leader == lane_id){
               stat[node] = false;
               twvalue[warp_id] = value[node];
@@ -247,12 +247,12 @@ __global__ void  gpu_push_slot(value_t *value, bool *stat, vertex_t *page,vertex
         //process warp node
         unsigned int warp_id = threadIdx.x/WPSIZE;
         unsigned int lane_id = cub::LaneId();
-        while(__any(len >= WPSIZE))
+        while(__any_sync(0xffffffff, len >= WPSIZE))
         {
-           int mask = __ballot(len >= WPSIZE ? 1 : 0);
+           int mask = __ballot_sync(0xffffffff, len >= WPSIZE ? 1 : 0);
            int leader = __ffs(mask) - 1;
-           unsigned int tpos = cub::ShuffleIndex(pos, leader);
-           unsigned int tlen = cub::ShuffleIndex(len, leader);
+           unsigned int tpos = __shfl_sync(0xffffffff, pos, leader);
+           unsigned int tlen = __shfl_sync(0xffffffff, len, leader);
            if(leader == lane_id){
               stat[node] = false;
               twvalue[warp_id] = value[node];

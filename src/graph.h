@@ -5,25 +5,34 @@
 #include <string.h>
 #include <cstdio>
 #include <stdlib.h>
+#include <string>
 #include <sys/stat.h>
 
 #include "page.h"
+#include "graph_bin64.h"
 
 #ifdef  APPSSSP
 #define WEIGHT
 #endif
 
 inline off_t fsize(const char *filename) {
-	struct stat st; 
+	struct stat st;
 	if (stat(filename, &st) == 0)
 		return st.st_size;
-	return -1; 
+	return -1;
 }
 
 
 template<typename vertex_t,typename index_t,typename value_t>
 bool fetch_graph(const char *graphfile,vertex_t &vert_count,index_t &edge_count,index_t *&csr_idx,vertex_t *&csr_ngh,vertex_t *&csr_wgh,vertex_t *&csr_deg,vertex_t **&h_page,Page<vertex_t> *&h_page_list,int &list_size,vertex_t &pagesize)
 {
+    if (scaph_is_bin64_format(std::string(graphfile))) {
+        return fetch_graph_bcsr64<vertex_t,index_t,value_t>(
+            graphfile, vert_count, edge_count,
+            csr_idx, csr_ngh, csr_wgh, csr_deg,
+            h_page, h_page_list, list_size, pagesize);
+    }
+
 	typedef Page<vertex_t> PageStruct;
     typedef GraphInfo<index_t,vertex_t> GraphStruct;
     bool ret_flag = false;

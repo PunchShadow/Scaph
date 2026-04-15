@@ -4,6 +4,7 @@
 #include <iostream>
 #include <pthread.h>
 #include <stdio.h>
+#include <unistd.h>
 
 // #include "gflags/gflags.h"
 
@@ -46,10 +47,65 @@ int FLAGS_threshold = 8; // 32 == 100%, 16 == 50%.
 bool FLAGS_check = false;
 int FLAGS_tricknum = 0;
 int FLAGS_src = 0;
+int FLAGS_runs = 10;
 double Total_throughput=0;
+double Total_kernel_time=0;
 
-std::string FLAGS_graphfile = "/home/sxy/lxl/Scaph_Bench/data/data/twitter-2010.edgelist.txt";
-char* graph_file_name_print = "twitter-2010";
+std::string FLAGS_graphfile = "";
+std::string graph_file_name_print = "";
+
+static inline std::string scaph_basename(const std::string &p)
+{
+    size_t s = p.find_last_of('/');
+    std::string base = (s == std::string::npos) ? p : p.substr(s + 1);
+    size_t d = base.find('.');
+    if (d != std::string::npos) base = base.substr(0, d);
+    return base;
+}
+
+static inline void scaph_parse_args(int argc, char **argv)
+{
+    auto starts_with = [](const std::string &s, const std::string &p) {
+        return s.size() >= p.size() && s.compare(0, p.size(), p) == 0;
+    };
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        auto take = [&](const std::string &key) -> std::string {
+            if (a == key && i + 1 < argc) { return std::string(argv[++i]); }
+            if (starts_with(a, key + "=")) return a.substr(key.size() + 1);
+            return std::string();
+        };
+        std::string v;
+        if (!(v = take("--input")).empty() || !(v = take("-input")).empty() ||
+            !(v = take("--graphfile")).empty() || !(v = take("-graphfile")).empty()) {
+            FLAGS_graphfile = v;
+        } else if (!(v = take("--src")).empty() || !(v = take("-src")).empty() ||
+                   !(v = take("--source")).empty() || !(v = take("-source")).empty()) {
+            FLAGS_src = std::atoi(v.c_str());
+        } else if (!(v = take("--pagesize")).empty() || !(v = take("-pagesize")).empty()) {
+            FLAGS_pagesize = std::atoi(v.c_str());
+        } else if (!(v = take("--max_memory")).empty() || !(v = take("-max_memory")).empty()) {
+            FLAGS_max_memory = std::atoi(v.c_str());
+        } else if (!(v = take("--multi")).empty() || !(v = take("-multi")).empty()) {
+            FLAGS_multi = std::atoi(v.c_str());
+        } else if (!(v = take("--num_stream")).empty() || !(v = take("-num_stream")).empty()) {
+            FLAGS_num_stream = std::atoi(v.c_str());
+        } else if (!(v = take("--num_blks")).empty() || !(v = take("-num_blks")).empty()) {
+            FLAGS_num_blks = std::atoi(v.c_str());
+        } else if (!(v = take("--num_thds")).empty() || !(v = take("-num_thds")).empty()) {
+            FLAGS_num_thds = std::atoi(v.c_str());
+        } else if (!(v = take("--threshold")).empty() || !(v = take("-threshold")).empty()) {
+            FLAGS_threshold = std::atoi(v.c_str());
+        } else if (!(v = take("--tricknum")).empty() || !(v = take("-tricknum")).empty()) {
+            FLAGS_tricknum = std::atoi(v.c_str());
+        } else if (!(v = take("--runs")).empty() || !(v = take("-runs")).empty()) {
+            FLAGS_runs = std::atoi(v.c_str());
+        } else if (a == "--check" || a == "-check") {
+            FLAGS_check = true;
+        }
+    }
+    graph_file_name_print = scaph_basename(FLAGS_graphfile);
+}
 
 //std::string FLAGS_graphfile = "/home/sxy/lxl/Scaph_Bench/uk2007/enterprise/uk-2007-05-edgelist.txt";
 //char* graph_file_name_print = "uk-2007";
@@ -100,6 +156,14 @@ public:
  value_t  *h_value,*d_value;
  vertex_t *h_degree,*d_degree;
 
+#ifdef APPPR
+ // PageRank needs extra per-vertex state beyond Scaph's generic
+ // (value, stat, degree). delta is aliased to d_value above.
+ value_t  *d_residual, *h_residual;
+ value_t  *d_pr_value, *h_pr_value;
+ int      *d_changed;
+#endif
+
  vertex_t **h_page,**d_page;
  vertex_t *h_page_nodes,*d_page_nodes;
  vertex_t *h_page_datas,*d_page_datas;
@@ -109,7 +173,11 @@ public:
  index_t  *csr_idx;
  vertex_t *csr_ngh;
  vertex_t *csr_deg;
- value_t  *csr_wgh;
+ // Storage type matches fetch_graph's signature (vertex_t, not value_t) —
+ // SSSP casts to value_t explicitly. This keeps the loader template usable
+ // when value_t = float (PR) while still working for integer-value apps
+ // where vertex_t and value_t happen to coincide.
+ vertex_t *csr_wgh;
 
  int transferred;
  int fulltrans;
@@ -121,11 +189,11 @@ public:
  App(int argc,char **argv);
  //~App();
  void load_graph();
- void run();
+ virtual void run();
  void iter_init();
  vertex_t gpu_push_batch();
  vertex_t cpu_push_iteration();
- vertex_t cpu_pull_iteration();  
+ vertex_t cpu_pull_iteration();
  vertex_t gpu_push_iteration();
  vertex_t gpu_pull_iteration();
  void PageCopy(VPstat &vp);
@@ -141,6 +209,7 @@ App<vertex_t,index_t,value_t>::App(int argc,char **argv)
 
 //  int num_stream = atoi(argv[1]);
 //  int num_blks = atoi(argv[1]);
+ scaph_parse_args(argc, argv);
  graphfile = FLAGS_graphfile;
 
  num_stream  = FLAGS_num_stream;
@@ -197,7 +266,7 @@ void App<vertex_t,index_t,value_t>::iter_init()
  H_ERR(cudaMemcpyFromSymbolAsync(&h_total_datas,d_total_datas,sizeof(int64_t),0,cudaMemcpyDeviceToHost,execstream[0]));
  cudaStreamSynchronize(copystream);
  cudaStreamSynchronize(execstream[0]);
- 
+
  pagehandler.Queue_Reset(h_page_datas);
 
  for(int i = 0; i < num_stream; i++){
@@ -219,7 +288,7 @@ void App<vertex_t,index_t,value_t>::trick()
 
 template<typename vertex_t,typename index_t,typename value_t>
 void App<vertex_t,index_t,value_t>::run()
-{ 
+{
  gpu_init();
  iter_init();
  int iters = 0;
@@ -250,9 +319,22 @@ void App<vertex_t,index_t,value_t>::run()
  
  //printf("|                   total iterator times : %-25d|\n", iters);
  double throughputi=edge_count / total_times / 1000.0 / 1000.0/ 1000.0;
- printf("|                         BFS costs     : %.8f seconds        |\n", total_times);
+#if defined(APPBFS)
+ const char *algo_name = "BFS";
+#elif defined(APPWCC)
+ const char *algo_name = "WCC";
+#elif defined(APPSSSP)
+ const char *algo_name = "SSSP";
+#elif defined(APPPR)
+ const char *algo_name = "PR";
+#else
+ const char *algo_name = "run";
+#endif
+ printf("|                         %-4s costs    : %.8f seconds        |\n", algo_name, total_times);
  printf("|                         Throughput    : %.8f GTEPS          |\n", throughputi);
+ printf("|                         iterations    : %-26d|\n", iters);
  Total_throughput+=throughputi;
+ Total_kernel_time+=total_times;
  //printf("|===================================================================|\n");
  
 
@@ -273,10 +355,9 @@ void App<vertex_t,index_t,value_t>::load_graph( )
     h_page,h_page_list,list_size,pagesize);
 
   printf("|========================Dataset Information========================|\n");
-  printf("|                       graph name      : %-26s|\n", graph_file_name_print);
-  printf("|                       graph nodes     : %-26d|\n", vert_count);
-  printf("|                       graph edges     : %-26u|\n", edge_count);
-  
+  printf("|                       graph name      : %-26s|\n", graph_file_name_print.c_str());
+  printf("|                       graph nodes     : %-26llu|\n", (unsigned long long)vert_count);
+  printf("|                       graph edges     : %-26llu|\n", (unsigned long long)edge_count);
 
   gpu_memsize -= sizeof(value_t)*vert_count;
   gpu_memsize -= sizeof(bool)*vert_count;
@@ -284,6 +365,11 @@ void App<vertex_t,index_t,value_t>::load_graph( )
   gpu_memsize -= sizeof(vertex_t)*list_size;
   gpu_memsize -= sizeof(vertex_t)*list_size;
   gpu_memsize -= sizeof(Page<vertex_t>)*list_size;
+#ifdef APPPR
+  // PageRank extras: d_residual + d_pr_value (d_changed is tiny).
+  gpu_memsize -= (int64_t)sizeof(value_t)*vert_count;  // d_residual
+  gpu_memsize -= (int64_t)sizeof(value_t)*vert_count;  // d_pr_value
+#endif
 
   execstream = new cudaStream_t[num_stream];
   for(int index = 0; index < num_stream; index++){
@@ -306,6 +392,13 @@ void App<vertex_t,index_t,value_t>::load_graph( )
      H_ERR(cudaMemcpyAsync(d_degree,csr_deg,vert_count*sizeof(vertex_t),cudaMemcpyHostToDevice,copystream));
      H_ERR(cudaMemcpyAsync(d_page_list,h_page_list,list_size*sizeof(Page<vertex_t>),cudaMemcpyHostToDevice,copystream));
      cudaStreamSynchronize(copystream);
+#ifdef APPPR
+     H_ERR(cudaMalloc((void **)&d_residual, sizeof(value_t)*vert_count));
+     H_ERR(cudaMalloc((void **)&d_pr_value, sizeof(value_t)*vert_count));
+     H_ERR(cudaMalloc((void **)&d_changed,  sizeof(int)));
+     H_ERR(cudaMallocHost((void **)&h_residual, sizeof(value_t)*vert_count));
+     H_ERR(cudaMallocHost((void **)&h_pr_value, sizeof(value_t)*vert_count));
+#endif
   }
   else{
      cout<<"vertex data out of gpu memory. exit!"<<endl;
@@ -408,7 +501,7 @@ int totaltask = pagehandler.expectq.Size();
 {
 #pragma omp section
 {
- parallel_compress_stat_async(h_page,h_stat,h_page_nodes,h_page_datas,h_page_list,vpstats,pagehandler.cached,list_size,pagesize,chunksize,threshold,endtimes,tids,pagehandler.mergeq);
+ parallel_compress_stat_async<vertex_t,index_t,value_t>(h_page,h_stat,h_page_nodes,h_page_datas,h_page_list,vpstats,pagehandler.cached,list_size,pagesize,chunksize,threshold,endtimes,tids,pagehandler.mergeq);
 }
 
 #pragma omp section
@@ -435,7 +528,11 @@ int totaltask = pagehandler.expectq.Size();
              cout<<"re-execute "<<eid<<endl;
           }*/
           exectimes++;
+#ifdef APPPR
+          gpu_push_csr_pr<vertex_t,index_t,value_t><<<num_blks,num_thds,0,execstream[sid]>>>(d_value,d_residual,d_stat,d_page_addr,d_page_nodes, eid, d_page_list);
+#else
           gpu_push_csr<vertex_t,index_t,value_t><<<num_blks,num_thds,0,execstream[sid]>>>(d_value,d_stat,d_page_addr,d_page_nodes, eid, d_page_list);
+#endif
           stream_last_task[sid] = eid;
        }
        else{

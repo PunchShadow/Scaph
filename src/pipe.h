@@ -1,7 +1,7 @@
 #ifndef __PIPE_CUH__
 #define __PIPE_CUH__
 
-#include <tbb/mutex.h>
+#include <mutex>
 
 template<typename T>
 class MFinFout
@@ -10,7 +10,7 @@ public:
 	int capicity;
 	int reader;
 	int writer;
-	tbb::mutex wd;
+	std::mutex wd;
 
 	T  *queue;
 public:
